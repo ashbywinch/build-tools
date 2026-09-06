@@ -11,6 +11,7 @@ real binary through a passthrough subprocess route.
 
 import argparse
 import json
+import os
 import re
 import sqlite3
 import subprocess
@@ -574,6 +575,22 @@ def test_render_actions_acks(tmp_path, capsys):
     assert "acknowledged in baseline (1): houses/app.py:1" in capsys.readouterr().out
 
 
+def test_render_actions_names_the_suppression_signal(capsys):
+    """A finding whose display kind differs from its marker kind says so —
+    an agent must not have to guess `latent-class` for a data-clump."""
+    a = ch.Action("latent-class", "fail", "x.py", 3, "f", "m", 1, 0, "", "")
+    a.signal = "data-clump"
+    ch._render_file_group("x.py", [a])
+    assert "suppress with: data-clump" in capsys.readouterr().out
+
+
+def test_render_actions_omits_signal_when_it_matches(capsys):
+    a = ch.Action("swallow", "fail", "x.py", 3, "f", "m", 1, 0, "", "")
+    a.signal = "swallow"
+    ch._render_file_group("x.py", [a])
+    assert "suppress with:" not in capsys.readouterr().out
+
+
 def test_main_stale_coverage_warning(tmp_path, capsys):
     repo = make_repo(tmp_path, app_src=SWALLOW_SRC)  # except Exception -> a fail action
     db = sqlite3.connect(repo / ".coverage")
@@ -611,6 +628,36 @@ def test_missing_binary_fails_fast(tmp_path):
     except RuntimeError as e:
         assert "scan binary is required" in str(e)
 
+
+
+def test_scanner_build_staleness_is_a_path_mtime_decision(tmp_path):
+    """The stale-binary guard: a local cargo build (.../scanner/target/
+    release/<bin>) whose scanner sources are newer is refused; a fresh build
+    is fine; bundled/env binaries (not under .../scanner/target/release)
+    are never refused even when a dev checkout's sources are newer."""
+    def touch(p: Path, when: float) -> None:
+        os.utime(p, (when, when))
+
+    base = tmp_path / "scanner"
+    (base / "src").mkdir(parents=True)
+    (base / "target" / "release").mkdir(parents=True)
+    src = base / "src" / "checks.rs"
+    src.write_text("pub fn f() {}\n")
+    binary = base / "target" / "release" / "lucidlint"
+    binary.write_text("elf")
+    touch(binary, 1000.0)
+    touch(src, 2000.0)  # source newer than the binary -> stale
+    assert ch._scanner_build_is_stale(binary) is True
+
+    touch(src, 500.0)  # binary newer -> fresh
+    assert ch._scanner_build_is_stale(binary) is False
+
+    # bundled shape (…/bin/lucidlint): never a local build, never refused
+    bundled = tmp_path / "bin" / "lucidlint"
+    bundled.parent.mkdir(parents=True)
+    bundled.write_text("elf")
+    touch(bundled, 1000.0)
+    assert ch._scanner_build_is_stale(bundled) is False
 
 # --------------------------------------------------------------------------- rust layer
 def test_rust_files_are_scanned(tmp_path, capsys):
@@ -826,7 +873,7 @@ def _rules_md_names() -> set[str]:
 def test_rule_groups_cover_every_family_kind():
     """Every emitted kind belongs to exactly one RULE_GROUPS group (group
     suppression would silently miss an unregistered family)."""
-    members = set().union(*ch.RULE_GROUPS.values())
+    members = ch.RULE_GROUPS.all_kinds()
     for kind in sorted(_family_kinds()):
         assert kind in members, f"kind '{kind}' is emitted but not in any RULE_GROUPS group"
 
@@ -838,6 +885,17 @@ def test_rule_groups_have_no_dead_kinds():
     for group, members in ch.RULE_GROUPS.items():
         for kind in members:
             assert kind in kinds, f"'{kind}' is in group:{group} but the scanner never emits it"
+
+
+def test_config_groups_accessors():
+    """The record's accessors say what consumers mean: kinds_in an unknown
+    group is empty (an unknown `group:` ignore expands to nothing), and
+    all_kinds is the registration universe."""
+    g = ch.RULE_GROUPS
+    assert g.kinds_in("no-such-group") == set()
+    assert g.kinds_in("swallow") == set()  # a KIND is not a group — the type stops the mixup
+    known = {kind for kinds in g.items() for kind in kinds[1]}
+    assert g.all_kinds() == known
 
 
 def test_every_emitted_kind_is_registered():
@@ -1207,6 +1265,6 @@ def test_rust_rule_groups_match_python():
     for m in re.finditer(r'\(\s*"([\w-]+)",\s*&\[\s*((?:"[a-z-]+",?\s*)+)', rust_src):
         rust_groups[m.group(1)] = set(re.findall(r'"([a-z-]+)"', m.group(2)))
     from lucidlint import RULE_GROUPS
-    assert set(rust_groups) == set(RULE_GROUPS), "group names drifted"
+    assert set(rust_groups) == set(RULE_GROUPS.groups()), "group names drifted"
     for name, kinds in RULE_GROUPS.items():
         assert rust_groups[name] == set(kinds), f"group '{name}' drifted"

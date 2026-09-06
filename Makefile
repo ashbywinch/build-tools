@@ -113,7 +113,7 @@ wheel-check: wheel
 	echo "${GREEN}✓ pip wheel: clean-venv install scans + fixes a mini project${NC}"
 
 
-coverage: deps
+coverage: deps scanner-check
 	@$(UV) run coverage run -m pytest tests/ -q --tb=short
 	@$(UV) run coverage report -m
 	@$(UV) run coverage xml
@@ -152,7 +152,7 @@ format: setup
 
 # The repo's defining gate: the tool must pass on itself — every finding
 # family (record-shape included) computes in the Rust core.
-self-check:
+self-check: deps scanner-check
 	@$(PYTHON) lucidlint.py --repo .
 	@echo "ok — the tool passes its own gate"
 

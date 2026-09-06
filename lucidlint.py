@@ -557,12 +557,44 @@ class RustFinding(NamedTuple):
     metric: float = 1.0
     col: int = 0  # 1-based anchor column; 0 = line-level (schema 3)
 
+@dataclass(frozen=True)
+class RustFixRequest:
+    """The --fix payload for the Rust scan core. A record with a to_json() —
+    a wire contract is still a record (the boundary doctrine)."""
+
+    kind: str
+    file: str
+    line: int
+    name: str
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self))
+
+
+def _print_trimmed_diff(before: str, after: str, rel: str) -> None:
+    """The applied change AS A DIFF — a fix the agent cannot review is a fix
+    the agent cannot trust (the houses sweep's 'always git diff after fix'
+    advice existed because the apply confirmation was a bare line)."""
+    diff = list(
+        difflib.unified_diff(
+            before.splitlines(),
+            after.splitlines(),
+            fromfile=f"{rel} (before)",
+            tofile=f"{rel} (after)",
+            lineterm="",
+        )
+    )
+    if not diff:
+        return
+    if len(diff) > 40:
+        diff = diff[:40] + [f"... ({len(diff) - 40} more diff lines omitted)"]
+    print("\n".join(diff))
+
 
 class _File(NamedTuple):
-    """The file a fix targets — its repo and repo-relative path. The
-    (rel, repo) pair travels together, and the fix operations belong on it
-    (the strewing pattern: functions sharing a domain class are its
-    methods)."""
+    """The file a fix targets — its repo and repo-relative path. The fixers
+    are methods on it: every fixer needs the same (repo, rel) pair (the
+    strewing pattern: functions sharing a domain class are its methods)."""
 
     repo: Path
     rel: str
@@ -575,9 +607,9 @@ class _File(NamedTuple):
         if binary is None:
             print("fix: the Rust scan core is required — build it with `make scanner-check`")
             return 1
-        # lucidlint: ignore record-shape the --fix request IS the wire contract
-        # with the Rust scan core's --fix mode
-        spec = json.dumps({"kind": kind, "file": str(repo / rel), "line": line, "name": name or ""})
+        target = repo / rel
+        before = target.read_text(encoding="utf-8") if target.exists() else None
+        spec = RustFixRequest(kind=kind, file=str(target), line=line, name=name or "").to_json()
         try:
             proc = subprocess.run(
                 [str(binary), "--fix", spec], capture_output=True, text=True, timeout=120, cwd=str(repo)
@@ -592,6 +624,8 @@ class _File(NamedTuple):
             if proc.stderr:
                 sys.stderr.write(proc.stderr)
             return 1
+        if before is not None:
+            _print_trimmed_diff(before, target.read_text(encoding="utf-8"), rel)
         return 0
 
     def finding_lines(self, kind: str) -> list[int]:
@@ -660,6 +694,23 @@ def _scanner_candidates(repo: Path, exe: str) -> list[Path]:
     candidates.append(Path(__file__).resolve().parent / "lucidlint_bin" / "bin" / f"lucidlint{exe}")
     return candidates
 
+def _scanner_build_is_stale(binary: Path) -> bool:
+    """True when the binary is a LOCAL cargo build (.../scanner/target/
+    release/<bin>) whose scanner sources are newer — a stale core would
+    silently test old rules. False for env-pinned and bundled binaries:
+    they are deliberate pins, and a dev checkout's sources are legitimately
+    newer than a released wheel. The source root is structural — the
+    `scanner` dir two levels above the binary — so this is a pure
+    path/mtime decision, testable without make."""
+    if len(binary.parents) < 3 or binary.parents[2].name != "scanner":
+        return False
+    newest = 0.0
+    src_root = binary.parents[2]
+    for p in src_root.rglob("*"):
+        if p.is_file() and (p.suffix == ".rs" or p.name in ("Cargo.toml", "Cargo.lock")):
+            newest = max(newest, p.stat().st_mtime)
+    return newest > binary.stat().st_mtime
+
 
 class _RustScan:
     """The Rust scan core — the required finding engine.
@@ -683,11 +734,24 @@ class _RustScan:
         tool checkout's build, then the distribution bundle's sibling binary
         (a `lucidlint` release installs as <prefix>/bin/lucidlint next to
         lucidlint.py — the bundle is self-contained, no env needed).
-        None when not built — the Python path takes over."""
+        None when not built — the Python path takes over. A LOCAL build
+        (scanner/target/release) whose sources are newer is treated as
+        missing: a stale core would silently test old rules — make the
+        forced rebuild (`make test`, `make self-check`) or refuse loudly
+        instead. env-overridden and bundled binaries are never refused —
+        they are deliberate pins."""
         if repo in self._binary_cache:
             return self._binary_cache[repo]
         exe = ".exe" if os.name == "nt" else ""
         found = next((p for p in _scanner_candidates(repo, exe) if p.is_file()), None)
+        if found is not None and _scanner_build_is_stale(found):
+            # a local build whose sources are newer — refusing beats testing
+            # old rules; env-pinned and bundled binaries are never refused
+            log(
+                f"the scanner binary at {found} is stale — scanner sources are newer; "
+                "rebuild with `make scanner-check` before running tests or the gate"
+            )
+            found = None
         self._binary_cache[repo] = found
         return found
 
@@ -830,6 +894,10 @@ def _rust_finding_rel(file_val: str, repo: Path, rels: set[str]) -> str | None:
 # (rule_metadata.py) — the config.rs mirror is generated from the same
 # source by `make rules`, so the gate and the LSP cannot drift.
 RULE_GROUPS = rule_metadata.CATALOG.groups()
+
+# every registered check kind — the fix command's kind check distinguishes
+# a real check that happens to have no auto-fix from a mistyped name
+_ALL_RULE_KINDS = frozenset(rule_metadata.CATALOG.kinds())
 
 # Cache for config loading
 # lucidlint: ignore global-state per-repo cache of the config file — one entry per repo per run
@@ -1149,11 +1217,18 @@ def _render_file_group(file: str, items: list[Action]) -> None:
     touched = " [in your diff]" if any(i.in_diff for i in items) else ""
     print(f"\n{file}{touched}")
     for a in items:
-        loc = f":{a.line}" + (f" ({a.function})" if a.function else "")
+        # the column anchors marker placement (schema-3): same-line twins
+        # peel inner-first, and the report names WHICH twin
+        loc = f":{a.line}" + (f":{a.col}" if a.col else "") + (f" ({a.function})" if a.function else "")
         churn = f" [churn {a.churn}x]" if a.churn else ""
         kinds = ",".join(a.kinds) if a.kinds else a.kind
         tag = f"P{a.priority:02d}" if a.severity != "warn" else "warn"
-        print(f"  [{tag}][{kinds}] {loc}{churn} — {a.message}")
+        suppress = (
+            f" — suppress with: {a.signal}"
+            if a.signal and a.signal != a.kind and a.signal not in a.kinds
+            else ""
+        )
+        print(f"  [{tag}][{kinds}]{suppress} {loc}{churn} — {a.message}")
         if a.note:
             print(f"      -> {a.note}")
 
@@ -1517,7 +1592,7 @@ class _GateRunner:
                 item = item.strip()
                 if item.startswith("group:"):
                     group_name = item[6:]
-                    group_signals = RULE_GROUPS.get(group_name)
+                    group_signals = RULE_GROUPS.kinds_in(group_name)
                     if group_signals:
                         result.global_ignore.update(group_signals)
                 else:
@@ -1531,7 +1606,7 @@ class _GateRunner:
                     for item in val["ignore"]:
                         item = item.strip()
                         if item.startswith("group:"):
-                            gs = RULE_GROUPS.get(item[6:])
+                            gs = RULE_GROUPS.kinds_in(item[6:])
                             if gs:
                                 path_ignores.update(gs)
                         else:
@@ -1779,7 +1854,7 @@ def _fix_refusal(kind: str, name: str | None, params: list[str] | None, file: st
         # would read as unfixable (the LSP placeholder flow depends on this)
         return (
             f"fix: {kind} needs a semantic name the tool cannot invent "
-            f"(--name <Name>) at {file}:{line} - naming is the judgement call"
+            f"(--name <Name>) at {file}:{line} - name it with a domain noun; naming is the judgement call"
         )
     return _fix_identifier_problem(kind, name, params, f"{file}:{line}") or (
         f"fix: nothing to change for {kind} at {file}:{line}"
@@ -1843,12 +1918,10 @@ class _FixCommand:
             print("fix: the Python fix engine requires libcst (a mandatory dependency) — `uv sync` installs it")
             return 1
         # schema-3 anchor: same-line twins need the finding's column — the
-        # innermost match wins, mirroring the peel binding order
-        col = 0
-        # schema-3 anchor: same-line twins need the finding's column — the
         # innermost match wins, mirroring the peel binding order. The
         # fix-kind to finding-kind mapping differs: extract-record-class is
         # the fix for record-shape findings; magic-number is its own kind.
+        col = 0
         signal = "record-shape" if self.fix_kind == "extract-record-class" else self.fix_kind
         if signal:
             anchors = [
@@ -1857,9 +1930,22 @@ class _FixCommand:
                 if f.signal == signal and f.line == self.args.line and f.col
             ]
             col = max(anchors) if anchors else 0
-        if (self.fix_kind not in fe.MECHANICAL_KINDS and self.fix_kind not in fe.STRUCTURAL_KINDS):
-            print(f"fix: no auto-fix exists for kind '{self.args.kind}' — check the kind name "
-                  f"against the finding's directive")
+        if self.fix_kind not in fe.MECHANICAL_KINDS and self.fix_kind not in fe.STRUCTURAL_KINDS:
+            # R31 (docs/PRD.md): messages address the actual mistake in
+            # plain language — never a bare "no auto-fix exists"
+            if self.fix_kind in _ALL_RULE_KINDS:
+                print(
+                    f"fix: '{self.args.kind}' cannot be fixed by this command — "
+                    f"the report line for it says what to change"
+                )
+            else:
+                near = difflib.get_close_matches(self.fix_kind, fe.FIXABLE_KINDS, n=1)
+                hint = (
+                    f" Did you mean '{near[0]}'?"
+                    if near
+                    else " Run the scan — its report lines name the checks this command can fix."
+                )
+                print(f"fix: '{self.args.kind}' is not a fixable kind.{hint}")
             return 1
         req = fe._FixRequest(
             kind=self.args.kind,
@@ -1937,13 +2023,15 @@ class _FixCommand:
                 diff = diff[:40] + [f"... ({len(diff) - 40} more lines omitted)"]
             print("\n".join(diff))
         print(
-            f"# the name `{self.args.name or '_extracted'}` is a placeholder — pick a real one; "
+            f"# the name `{self.args.name or '_extracted'}` is a placeholder — pick a real domain noun; "
             f"apply it: lucidlint fix --kind {self.args.kind} --file {self.args.file} "
             f"--line {self.args.line} --name <name>"
         )
         return 0
 
     def _apply(self, req, moved: bool = False) -> int:
+        target = self.repo / self.args.file
+        before = target.read_text(encoding="utf-8") if target.exists() else None
         description = req.fix_finding()
         if description is None:
             if req.decline:
@@ -1952,10 +2040,15 @@ class _FixCommand:
                 return 0
             if self.fix_kind in _name_required_kinds() and self.args.name is None:
                 print(f"fix: {self.fix_kind} at {self.args.file}:{req.line} needs a semantic name "
-                      f"the tool cannot invent — pass --name <Name> (naming is the judgement call)")
+                      f"the tool cannot invent — pass --name <Name> (name it with a domain noun)")
                 return 0
             return self._reattach_or_silence(req, moved)
         print(f"fix: applied {self.fix_kind} at {self.args.file}:{req.line} — {description}")
+        if before is not None:
+            # extract-module moves defs into a NEW module: the diff here is
+            # the origin file; the created module's content is the preview
+            # the agent already reviewed
+            _print_trimmed_diff(before, target.read_text(encoding="utf-8"), self.args.file)
         return 0
 
     def _reattach_or_silence(self, req, moved: bool) -> int:

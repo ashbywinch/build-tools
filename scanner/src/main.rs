@@ -2849,7 +2849,18 @@ mod tests {
         assert_eq!(clumps.len(), 1, "{f:?}");
         assert!(clumps[0].message.contains("(em, vm)"), "{}", clumps[0].message);
         assert!(clumps[0].message.contains("(em, x)"), "{}", clumps[0].message);
-        assert!(clumps[0].message.contains("pairs travel"), "{}", clumps[0].message);
+        assert!(
+            clumps[0].message.contains("data clumps: the parameter pairs"),
+            "{}",
+            clumps[0].message
+        );
+        assert!(clumps[0].message.contains("(em, vm)"), "{}", clumps[0].message);
+        assert!(clumps[0].message.contains("(em, x)"), "{}", clumps[0].message);
+        assert!(
+            !clumps[0].message.contains("share the parameter"),
+            "{}",
+            clumps[0].message
+        );
     }
 
     #[test]

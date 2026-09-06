@@ -2050,11 +2050,7 @@ pub fn data_clump_findings(state: &mut ScanState, body: &[Stmt]) {
             .map(|(a, b)| format!("({a}, {b})"))
             .collect::<Vec<_>>()
             .join(", ");
-        let (pair_word, verb) = if group_pairs.len() == 1 {
-            ("pair", "travels")
-        } else {
-            ("pairs", "travel")
-        };
+        let pair_word = if group_pairs.len() == 1 { "pair" } else { "pairs" };
         state.findings.push(Finding {
             col: 0,
             file: state.file.to_string(),
@@ -2062,14 +2058,14 @@ pub fn data_clump_findings(state: &mut ScanState, body: &[Stmt]) {
             function: anchor,
             kind: "data-clump".into(),
             severity: "fail".into(),
+            // each listed pair has its OWN >= 3 functions — do not claim
+            // one function set shares them all (review-bot, PR #15)
             message: format!(
-                "{} functions ({}) share the parameter {} {} — a data clump: the {} {} together; introduce a parameter object named with a domain noun",
-                names.len(),
-                names.join(", "),
-                pair_word,
-                pair_text,
-                pair_word,
-                verb
+                "{names_count} functions near here ({names}) sit in data clumps: the parameter {pw} {pairs} — split out a class per clump, each named with a domain noun",
+                names_count = names.len(),
+                names = names.join(", "),
+                pw = pair_word,
+                pairs = pair_text,
             ),
         });
     }

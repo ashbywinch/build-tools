@@ -11,6 +11,7 @@ real binary through a passthrough subprocess route.
 
 import argparse
 import json
+import os
 import re
 import sqlite3
 import subprocess
@@ -627,6 +628,36 @@ def test_missing_binary_fails_fast(tmp_path):
     except RuntimeError as e:
         assert "scan binary is required" in str(e)
 
+
+
+def test_scanner_build_staleness_is_a_path_mtime_decision(tmp_path):
+    """The stale-binary guard: a local cargo build (.../scanner/target/
+    release/<bin>) whose scanner sources are newer is refused; a fresh build
+    is fine; bundled/env binaries (not under .../scanner/target/release)
+    are never refused even when a dev checkout's sources are newer."""
+    def touch(p: Path, when: float) -> None:
+        os.utime(p, (when, when))
+
+    base = tmp_path / "scanner"
+    (base / "src").mkdir(parents=True)
+    (base / "target" / "release").mkdir(parents=True)
+    src = base / "src" / "checks.rs"
+    src.write_text("pub fn f() {}\n")
+    binary = base / "target" / "release" / "lucidlint"
+    binary.write_text("elf")
+    touch(binary, 1000.0)
+    touch(src, 2000.0)  # source newer than the binary -> stale
+    assert ch._scanner_build_is_stale(binary) is True
+
+    touch(src, 500.0)  # binary newer -> fresh
+    assert ch._scanner_build_is_stale(binary) is False
+
+    # bundled shape (…/bin/lucidlint): never a local build, never refused
+    bundled = tmp_path / "bin" / "lucidlint"
+    bundled.parent.mkdir(parents=True)
+    bundled.write_text("elf")
+    touch(bundled, 1000.0)
+    assert ch._scanner_build_is_stale(bundled) is False
 
 # --------------------------------------------------------------------------- rust layer
 def test_rust_files_are_scanned(tmp_path, capsys):

@@ -694,6 +694,23 @@ def _scanner_candidates(repo: Path, exe: str) -> list[Path]:
     candidates.append(Path(__file__).resolve().parent / "lucidlint_bin" / "bin" / f"lucidlint{exe}")
     return candidates
 
+def _scanner_build_is_stale(binary: Path) -> bool:
+    """True when the binary is a LOCAL cargo build (.../scanner/target/
+    release/<bin>) whose scanner sources are newer — a stale core would
+    silently test old rules. False for env-pinned and bundled binaries:
+    they are deliberate pins, and a dev checkout's sources are legitimately
+    newer than a released wheel. The source root is structural — the
+    `scanner` dir two levels above the binary — so this is a pure
+    path/mtime decision, testable without make."""
+    if len(binary.parents) < 3 or binary.parents[2].name != "scanner":
+        return False
+    newest = 0.0
+    src_root = binary.parents[2]
+    for p in src_root.rglob("*"):
+        if p.is_file() and (p.suffix == ".rs" or p.name in ("Cargo.toml", "Cargo.lock")):
+            newest = max(newest, p.stat().st_mtime)
+    return newest > binary.stat().st_mtime
+
 
 class _RustScan:
     """The Rust scan core — the required finding engine.
@@ -717,11 +734,24 @@ class _RustScan:
         tool checkout's build, then the distribution bundle's sibling binary
         (a `lucidlint` release installs as <prefix>/bin/lucidlint next to
         lucidlint.py — the bundle is self-contained, no env needed).
-        None when not built — the Python path takes over."""
+        None when not built — the Python path takes over. A LOCAL build
+        (scanner/target/release) whose sources are newer is treated as
+        missing: a stale core would silently test old rules — make the
+        forced rebuild (`make test`, `make self-check`) or refuse loudly
+        instead. env-overridden and bundled binaries are never refused —
+        they are deliberate pins."""
         if repo in self._binary_cache:
             return self._binary_cache[repo]
         exe = ".exe" if os.name == "nt" else ""
         found = next((p for p in _scanner_candidates(repo, exe) if p.is_file()), None)
+        if found is not None and _scanner_build_is_stale(found):
+            # a local build whose sources are newer — refusing beats testing
+            # old rules; env-pinned and bundled binaries are never refused
+            log(
+                f"the scanner binary at {found} is stale — scanner sources are newer; "
+                "rebuild with `make scanner-check` before running tests or the gate"
+            )
+            found = None
         self._binary_cache[repo] = found
         return found
 

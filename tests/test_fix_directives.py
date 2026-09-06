@@ -97,7 +97,7 @@ def test_fix_refuses_unfixable_kind_on_rust_file(tmp_path, capsys):
     rc = run_fix(repo, "fix", "--kind", "vague-name", "--file", "lib.rs", "--line", "1")
     assert rc == 1
     out = capsys.readouterr().out
-    assert "vague-name" in out and "no Rust fix" in out, out
+    assert "vague-name" in out and "no Rust auto-fix" in out, out
     assert (repo / "lib.rs").read_text() == "fn main() {}\n"
 
 

@@ -624,8 +624,11 @@ impl<'a> StaleCtx<'a> {
                 let lines = self.lines_for(sig);
                 let reason = if lines.is_empty() {
                     "no matching finding fires in this file — it was fixed, or the kind was renamed".to_string()
+                } else if lines.iter().all(|l| self.used_line.contains(&(*l, sig.clone()))) {
+                    "every matching finding already has its own line-level marker — the file suppression is redundant"
+                        .to_string()
                 } else {
-                    "the suppressions covered only findings that no longer fire".to_string()
+                    "matching findings exist but the file suppression was never consumed — one of them should have matched it".to_string()
                 };
                 out.push(crate::Finding {
                     col: 0,

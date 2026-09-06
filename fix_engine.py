@@ -90,9 +90,12 @@ _NAME_REQUIRED_KINDS = {
     "extract-module",
 }
 # Every kind the fix command can actually apply. A finding message may
-# advertise "— fix: <kind>" ONLY when the kind is here (for .rs files, in
-# lucidlint.RUST_FIXABLE_KINDS) — suggesting a fix that cannot apply sends
-# agents hand-editing around working automation, or guessing at a seam.
+    # restrict advertising to what the fix command can actually apply: a
+    # finding message may advertise "— fix: <kind>" ONLY when the kind is
+    # here — suggesting a fix that cannot apply sends agents hand-editing
+    # around working automation, or guessing at a seam. (Rust-file kinds are
+    # guarded by the Rust binary's own refusal; Python kinds refused by the
+    # gate's unknown-kind guard.)
 FIXABLE_KINDS = set(MECHANICAL_KINDS) | set(_STRUCTURAL_FIXERS) | {"extract-module"}
 
 

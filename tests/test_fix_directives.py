@@ -36,11 +36,6 @@ def tails_of(src: str) -> list[str]:
     return [k for k in TAIL.findall(src) if k != "lucidlint"]
 
 
-def test_rust_fixable_constant_matches_the_dispatcher():
-    assert rust_fixable_from_dispatch() == ch.RUST_FIXABLE_KINDS, (
-        f"RUST_FIXABLE_KINDS {sorted(ch.RUST_FIXABLE_KINDS)} != dispatcher "
-        f"{sorted(rust_fixable_from_dispatch())}"
-    )
 
 
 def test_python_finding_tails_name_python_fixable_kinds():
@@ -61,24 +56,41 @@ def test_rust_finding_tails_name_rust_fixable_kinds():
     assert offenders == [], f"fix directives with no Rust fixer: {offenders}"
 
 
-def test_fix_refuses_kind_without_a_python_fixer(tmp_path, capsys):
-    """`fix --kind data-clump` refuses cleanly — not a traceback, not a
-    silent success, and not 'nothing to change' (which reads as
-    already-fixed)."""
+def test_fix_refuses_a_check_without_an_auto_fix(tmp_path, capsys):
+    """`fix --kind data-clump` says the check can't be fixed by this command
+    and points at the report — not a traceback, not a silent success, and
+    not a bare 'no auto-fix exists' (R31: the message addresses the
+    mistake)."""
     repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
     (repo / "houses").mkdir(parents=True)
     (repo / "houses" / "app.py").write_text("x = 1\n")
     rc = run_fix(repo, "fix", "--kind", "data-clump", "--file", "houses/app.py", "--line", "1")
     assert rc == 1
     out = capsys.readouterr().out
-    assert "data-clump" in out and "no fix" in out, out
+    assert "data-clump" in out and "cannot be fixed by this command" in out, out
+    assert "report line" in out, out
     assert "Traceback" not in out
 
 
+def test_fix_refuses_an_unknown_kind_with_a_hint(tmp_path, capsys):
+    """`fix --kind magic-nubmer` says the kind is not fixable and suggests
+    the closest real name — the message is designed around the typo."""
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "houses").mkdir(parents=True)
+    (repo / "houses" / "app.py").write_text("x = 1\n")
+    rc = run_fix(repo, "fix", "--kind", "magic-nubmer", "--file", "houses/app.py", "--line", "1")
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "magic-nubmer" in out and "not a fixable kind" in out, out
+    assert "Did you mean 'magic-number'" in out, out
+
+
 def test_fix_refuses_unfixable_kind_on_rust_file(tmp_path, capsys):
-    """`fix --kind vague-name --file x.rs` refuses BEFORE dispatch — the
-    fallback used to run extract-method at that line (the wrong fix, applied
-    silently)."""
+    """`fix --kind vague-name --file x.rs` refuses — the Rust engine names
+    exactly which fixes exist; nothing is written, and the previous
+    dispatcher fallback (running extract-method at that line) never fires."""
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "lib.rs").write_text("fn main() {}\n")
@@ -86,7 +98,6 @@ def test_fix_refuses_unfixable_kind_on_rust_file(tmp_path, capsys):
     assert rc == 1
     out = capsys.readouterr().out
     assert "vague-name" in out and "no Rust fix" in out, out
-    assert "extract" not in out, out
     assert (repo / "lib.rs").read_text() == "fn main() {}\n"
 
 

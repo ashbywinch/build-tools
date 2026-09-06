@@ -259,6 +259,20 @@ rather than a number.
   apply. (Rationale: an offer that refuses wastes the agent's turn; an
   explanation of inability is noise — 2026-08-17; three-shape contract —
   2026-09-05.)
+- **R31 — Messages are plain language with a complete contract.** Every
+  message a user or agent receives — report entries, fix-command output,
+  suppressions — uses plain, user-friendly language and only very common
+  software jargon; never the tool's internal vocabulary ("findings",
+  "directives", "families", "signals" are report-level words, not
+  instructional ones). Every message states what is wrong, and then
+  exactly one of these: names the auto-fix; explains what the user must do
+  when no auto-fix exists; or says nothing further. A message whose only
+  content is "no auto-fix exists" fails this rule — if the fix command
+  receives a kind it cannot fix, the message is designed around the actual
+  mistake: a check that has no auto-fix says the report line tells the
+  user what to change; a kind the tool does not know says so and suggests
+  the closest fixable name. (Rationale: agents act on the message; a
+  dead-end message wastes the turn; jargon hides the seam — 2026-09-06.)
 - **R27 — Agents never compute line numbers; the tool owns its own
   coordinates.** Findings are located for fixing by the finding's own
   output (the report line and the JSON `line` field are the source of

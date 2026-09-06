@@ -2340,8 +2340,10 @@ pub fn undeclared_findings(scans: &[crate::UndeclScan]) -> Vec<Finding> {
         for base in &c.bases {
             let candidates: Vec<(String, String)> = if let Some(rest) = base.strip_prefix("Name:") {
                 let mut cands = vec![(key.0.clone(), rest.to_string())];
-                if let Some((module, _name)) = imports_of.get(rest) {
-                    cands.push(((*module).to_string(), rest.to_string()));
+                if let Some((module, imported)) = imports_of.get(rest) {
+                    // `from base import Node as N`: the candidate class is the
+                    // IMPORTED name, not the local alias (review-bot, PR #15)
+                    cands.push(((*module).to_string(), (*imported).to_string()));
                 }
                 cands
             } else if let Some(rest) = base.strip_prefix("Attr:") {
@@ -6067,8 +6069,8 @@ pub fn abstraction_findings(scans: &[(String, Vec<crate::ClassInfo>, Vec<crate::
             for base in &c.bases {
                 let candidates: Vec<(String, String)> = if let Some(rest) = base.strip_prefix("Name:") {
                     let mut cands = vec![(rel.clone(), rest.to_string())];
-                    if let Some((module, _name)) = import_map.get(rest) {
-                        cands.push(((*module).to_string(), rest.to_string()));
+                    if let Some((module, imported)) = import_map.get(rest) {
+                        cands.push(((*module).to_string(), (*imported).to_string()));
                     }
                     cands
                 } else if let Some(rest) = base.strip_prefix("Attr:") {

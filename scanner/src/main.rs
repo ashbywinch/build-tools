@@ -1654,7 +1654,7 @@ fn main() {
                     // the request is WELL-FORMED — the honest refusal names
                     // the gap: this fix family has no Rust engine yet (the
                     // Python families run through lucidlint.py's libcst path)
-                    println!("fix: {kind} has no Rust fixer yet - the Rust core handles extract-method, dispatch-registry, rule-table; refactor by hand");
+                    println!("fix: {kind} has no Rust auto-fix - the Rust engine fixes extract-method, dispatch-registry, rule-table only; the report line for it says what to change");
                     std::process::exit(2);
                 }
                 if kind == "extract-method" || kind == "dispatch-registry" || kind == "rule-table" {
@@ -2940,6 +2940,23 @@ mod tests {
             (
                 "sub.py",
                 "from base import Node\n\nclass Doc(Node):\n    def refresh(self):\n        self.display_name = \"x\"\n",
+            ),
+        ]);
+        assert!(!f.iter().any(|x| x.kind == "undeclared-attribute"), "{f:?}");
+    }
+
+    #[test]
+    fn undeclared_attribute_resolves_aliased_imported_base() {
+        // `from base import Node as BaseNode` — the ancestor resolves by
+        // its IMPORTED name, not the local alias (review-bot, PR #15)
+        let f = scan_corpus(&[
+            (
+                "base.py",
+                "class Node:\n    def __init__(self):\n        self.display_name: str = \"\"\n",
+            ),
+            (
+                "sub.py",
+                "from base import Node as BaseNode\n\nclass Doc(BaseNode):\n    def refresh(self):\n        self.display_name = \"x\"\n",
             ),
         ]);
         assert!(!f.iter().any(|x| x.kind == "undeclared-attribute"), "{f:?}");

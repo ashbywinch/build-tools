@@ -865,6 +865,10 @@ def _rust_finding_rel(file_val: str, repo: Path, rels: set[str]) -> str | None:
 # source by `make rules`, so the gate and the LSP cannot drift.
 RULE_GROUPS = rule_metadata.CATALOG.groups()
 
+# every registered check kind — the fix command's kind check distinguishes
+# a real check that happens to have no auto-fix from a mistyped name
+_ALL_RULE_KINDS = frozenset(rule_metadata.CATALOG.kinds())
+
 # Cache for config loading
 # lucidlint: ignore global-state per-repo cache of the config file — one entry per repo per run
 _CONFIG_CACHE: dict[Path, _LucidlintConfig] = {}
@@ -1287,10 +1291,6 @@ _FIX_ALIASES = {
     "complexity": "extract-method",
     "large-function": "extract-method",
 }
-# The kinds the Rust scan core's --fix dispatcher routes (main.rs);
-# tests/test_fix_directives.py parses the dispatcher arms to keep the two in
-# step. `fix` refuses any other kind on a .rs file BEFORE dispatch.
-RUST_FIXABLE_KINDS = {"extract-method", "dispatch-registry", "rule-table"}
 
 
 # the raw TOML payload handed to _merge_config — a wire-format blob, not a
@@ -1867,21 +1867,6 @@ class _FixCommand:
         if bad:
             print(bad)
             return 1
-        # An unfixable kind refuses HERE — naming the message's instruction
-        # as the fix — instead of reaching an engine that would answer
-        # "nothing to change" (which reads as already-fixed) or a dispatcher
-        # fallback guessing at a different fix.
-        if self.rel.endswith(".rs"):
-            if self.fix_kind not in RUST_FIXABLE_KINDS:
-                print(
-                    f"fix: {self.fix_kind} has no Rust fix — the finding's message carries the instruction"
-                )
-                return 1
-        elif fix_engine is not None and self.fix_kind not in fix_engine.FIXABLE_KINDS:
-            print(
-                f"fix: {self.fix_kind} has no fix — the finding's message carries the instruction"
-            )
-            return 1
         if self.args.line == 0:
             exit_code = self._resolve_line()
             if exit_code is not None:
@@ -1915,9 +1900,22 @@ class _FixCommand:
                 if f.signal == signal and f.line == self.args.line and f.col
             ]
             col = max(anchors) if anchors else 0
-        if (self.fix_kind not in fe.MECHANICAL_KINDS and self.fix_kind not in fe.STRUCTURAL_KINDS):
-            print(f"fix: no auto-fix exists for kind '{self.args.kind}' — check the kind name "
-                  f"against the finding's directive")
+        if self.fix_kind not in fe.MECHANICAL_KINDS and self.fix_kind not in fe.STRUCTURAL_KINDS:
+            # R31 (docs/PRD.md): messages address the actual mistake in
+            # plain language — never a bare "no auto-fix exists"
+            if self.fix_kind in _ALL_RULE_KINDS:
+                print(
+                    f"fix: '{self.args.kind}' cannot be fixed by this command — "
+                    f"the report line for it says what to change"
+                )
+            else:
+                near = difflib.get_close_matches(self.fix_kind, fe.FIXABLE_KINDS, n=1)
+                hint = (
+                    f" Did you mean '{near[0]}'?"
+                    if near
+                    else " Run the scan — its report lines name the checks this command can fix."
+                )
+                print(f"fix: '{self.args.kind}' is not a fixable kind.{hint}")
             return 1
         req = fe._FixRequest(
             kind=self.args.kind,

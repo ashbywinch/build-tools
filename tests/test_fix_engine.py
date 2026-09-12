@@ -2106,3 +2106,9 @@ def test_loop_hoist_refuses_unsafe_bodies(tmp_path):
     out3, fixed3 = _hoist_fix(tmp_path, "loop_hoist_bad.py", "b_read", name=None)
     assert out3 is None
     assert fixed3 == src
+    # a nested def's locals are its own scope — their writes must not
+    # read as outer-state writes (the review finding: `got` inside
+    # `_fmt` is not an accumulator)
+    out4, fixed4 = _hoist_fix(tmp_path, "loop_hoist_bad.py", "b_nested", name="score")
+    assert out4 is not None
+    assert "def _score(it):" in fixed4

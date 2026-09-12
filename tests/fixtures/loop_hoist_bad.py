@@ -42,3 +42,16 @@ def b_extend(items):
     for it in items:
         out.extend(it)
     return out
+
+
+def b_nested(items):
+    out = []
+    for it in items:
+        x = it * 2
+
+        def _fmt(v):
+            got = v + 1
+            return got
+
+        out.append(_fmt(x))
+    return out

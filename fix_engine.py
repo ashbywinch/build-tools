@@ -2029,6 +2029,20 @@ def _iter_nodes(nodes):
             yield from _iter_nodes(c)
 
 
+def _iter_nodes_pruned(nodes):
+    """Like `_iter_nodes` but never descends into nested scopes — a `def`
+    or `class` inside the walked body owns its locals; their writes are
+    not the body's writes."""
+    if isinstance(nodes, cst.CSTNode):
+        nodes = [nodes]
+    for n in nodes:
+        yield n
+        if isinstance(n, (cst.FunctionDef, cst.ClassDef)):
+            continue
+        for c in n.children:
+            yield from _iter_nodes_pruned(c)
+
+
 def _hoist_target_names(t) -> set[str]:
     """The names a binding TARGET binds — Name/Tuple/List/Starred (a
     subscript/attribute target is a WRITE, not a binding)."""
@@ -2274,7 +2288,7 @@ class _LoopHoistExtractor(cst.CSTTransformer):
                 )
                 return None
         for s in body_stmts:
-            for n in _iter_nodes([s]):
+            for n in _iter_nodes_pruned([s]):
                 if isinstance(n, cst.AnnAssign):
                     target_list: list = [n.target]
                 elif isinstance(n, cst.Assign):

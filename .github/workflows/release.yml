@@ -131,11 +131,11 @@ jobs:
           dir="lucidlint-${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'dev' }}-${{ matrix.target }}"
           # absolute bundle path: deploy-check runs the command with the
           # project dir as cwd, so a checkout-relative path would resolve
-          # inside the project and fail with non-JSON output. The POSIX
-          # spelling ($GITHUB_WORKSPACE with / separators) survives the
-          # shlex split on the windows runner: a backslash path would glue
-          # to its neighbour (...\bundle-check\alucidlint...) when the
-          bundle="$GITHUB_WORKSPACE/dist/${dir}/lucidlint.py"
+          # inside the project and fail with non-JSON output. The windows
+          # runner's GITHUB_WORKSPACE uses backslashes, which shlex treats
+          # as escapes (D:\a\... glues to D:alucidlint...) - normalize to
+          # forward slashes before the value reaches shlex.
+          bundle="${GITHUB_WORKSPACE//\\//}/dist/${dir}/lucidlint.py"
           python3 scripts/deploy-check.py --lucidlint "python3 ${bundle}" --project "${RUNNER_TEMP}/bundle-check"
       - name: Post-packaging check — musl bundle degrades honestly (no libcst by design)
         # The static bundle cannot load glibc-built libcst, so it ships

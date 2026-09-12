@@ -34,6 +34,16 @@ fn byte_offset(source: &str, lc: LineColumn) -> usize {
     source.len()
 }
 
+/// The fn whose span contains `line` — the loop fixes resolve by finding
+/// line, not by position in the file (a later fn's loop must not rewrite
+/// through the first fn's accumulator).
+fn enclosing_fn(file: &syn::File, line: usize) -> Option<&ItemFn> {
+    file.items.iter().find_map(|item| match item {
+        Item::Fn(f) if f.span().start().line <= line && line <= f.span().end().line => Some(f),
+        _ => None,
+    })
+}
+
 /// Collect `let`/loop/closure/match bindings in a statement set.
 struct BindCollector<'a> {
     bound: &'a mut std::collections::HashSet<String>,
@@ -975,10 +985,7 @@ pub fn loop_pipeline_fixable(source: &str, _file: &str, line: usize) -> bool {
     let Ok(file) = syn::parse_file(source) else {
         return false;
     };
-    let Some(target) = file.items.iter().find_map(|item| match item {
-        Item::Fn(f) => Some(f),
-        _ => None,
-    }) else {
+    let Some(target) = enclosing_fn(&file, line) else {
         return false;
     };
     let stmts = &target.block.stmts;
@@ -993,14 +1000,7 @@ pub fn loop_pipeline_fixable(source: &str, _file: &str, line: usize) -> bool {
 
 pub fn fix_loop_pipeline(source: &str, line: usize) -> Result<String, String> {
     let file = syn::parse_file(source).map_err(|_| "the file does not parse".to_string())?;
-    let target = file
-        .items
-        .iter()
-        .find_map(|item| match item {
-            Item::Fn(f) => Some(f),
-            _ => None,
-        })
-        .ok_or_else(|| "no function found".to_string())?;
+    let target = enclosing_fn(&file, line).ok_or_else(|| format!("no function contains line {line}"))?;
     // the loop AT the finding line — top-level statements only
     let stmts = &target.block.stmts;
     let loop_idx = stmts
@@ -1557,14 +1557,7 @@ pub fn fix_loop_hoist(source: &str, line: usize, name: &str) -> Result<String, S
         format!("_{name}")
     };
     let file = syn::parse_file(source).map_err(|_| "the file does not parse".to_string())?;
-    let target = file
-        .items
-        .iter()
-        .find_map(|item| match item {
-            Item::Fn(f) => Some(f),
-            _ => None,
-        })
-        .ok_or_else(|| "no function found".to_string())?;
+    let target = enclosing_fn(&file, line).ok_or_else(|| format!("no function contains line {line}"))?;
     let stmts = &target.block.stmts;
     let loop_idx = stmts
         .iter()
@@ -1709,5 +1702,20 @@ mod loop_tests {
     fn sequence_refuses_interleaved_statements() {
         let src = "fn f(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for x in xs {\n        out.push(*x);\n    }\n    let n = out.len();\n    for y in xs {\n        out.push(*y);\n    }\n    out\n}\n";
         assert!(fix_loop_sequence(src, 1).is_err());
+    }
+
+    #[test]
+    fn pipeline_fixes_a_loop_in_a_later_function() {
+        // the review finding: the fixer resolved the FIRST fn, so a loop
+        // in a later fn rewrote through the wrong accumulator (or refused
+        // with "no for-loop at line N"). The finding line selects the
+        // enclosing fn.
+        let src = "fn first() -> u32 {\n    1\n}\n\nfn collect(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for x in xs {\n        out.push(*x);\n    }\n    out\n}\n";
+        let out = fix_loop_pipeline(&src, 7).expect("fix applies in the later fn");
+        assert!(
+            out.contains("let out: Vec<_> = xs.iter().map(|x| *x).collect();"),
+            "{out}"
+        );
+        assert!(out.contains("fn first() -> u32"), "{out}");
     }
 }

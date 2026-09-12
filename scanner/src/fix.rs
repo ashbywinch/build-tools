@@ -1134,6 +1134,7 @@ pub fn fix_loop_sequence(source: &str, line: usize) -> Result<String, String> {
 /// body's own bindings (loop pattern + `let`s — temps the helper keeps).
 struct HoistPlan {
     acc: String,
+    push_args: Vec<proc_macro2::Span>,
 }
 /// The single accumulator the body pushes to, plus the push-receiver
 /// paths (a mid-build READ check must not mistake a receiver for a read).
@@ -1142,11 +1143,12 @@ struct HoistPlan {
 fn hoist_push_accum(
     body: &[Stmt],
     bound: &std::collections::HashSet<String>,
-) -> Result<(String, Vec<*const syn::ExprPath>), String> {
+) -> Result<(String, Vec<*const syn::ExprPath>, Vec<proc_macro2::Span>), String> {
     struct PushScan<'x> {
         bound: &'x std::collections::HashSet<String>,
         acc: Option<String>,
         receivers: Vec<*const syn::ExprPath>,
+        push_args: Vec<proc_macro2::Span>,
         decline: Option<String>,
     }
     impl syn::visit::Visit<'_> for PushScan<'_> {
@@ -1181,6 +1183,9 @@ fn hoist_push_accum(
                     if let syn::Expr::Path(p) = node.receiver.as_ref() {
                         self.receivers.push(p as *const syn::ExprPath);
                     }
+                    if let Some(arg0) = node.args.first() {
+                        self.push_args.push(arg0.span());
+                    }
                 }
             }
             syn::visit::visit_expr_method_call(self, node);
@@ -1190,6 +1195,7 @@ fn hoist_push_accum(
         bound,
         acc: None,
         receivers: Vec::new(),
+        push_args: Vec::new(),
         decline: None,
     };
     for s in body {
@@ -1204,7 +1210,7 @@ fn hoist_push_accum(
     let acc = scan
         .acc
         .ok_or_else(|| "no outer collection mutation found in the loop body".to_string())?;
-    Ok((acc, scan.receivers))
+    Ok((acc, scan.receivers, scan.push_args))
 }
 
 /// No mid-build READ of the accumulator except as a push receiver.
@@ -1332,11 +1338,11 @@ fn hoist_plan(source: &str, stmts: &[Stmt], loop_idx: usize) -> Result<(HoistPla
         syn::visit::Visit::visit_stmt(&mut l, s);
         bound.extend(l.0);
     }
-    let (acc, receivers) = hoist_push_accum(&f.body.stmts, &bound)?;
+    let (acc, receivers, push_args) = hoist_push_accum(&f.body.stmts, &bound)?;
     hoist_no_mid_read(&f.body.stmts, &acc, &receivers)?;
     hoist_no_other_write(&f.body.stmts, &bound, &acc)?;
     let iter = span_text(source, f.expr.span())?;
-    Ok((HoistPlan { acc }, target, iter))
+    Ok((HoistPlan { acc, push_args }, target, iter))
 }
 
 /// A name absent from the file — the helper-local and the flatten variable
@@ -1477,7 +1483,7 @@ struct HelperBody {
     conditional: bool,
 }
 
-fn hoist_helper_text(sig: &HelperSig, body: &HelperBody) -> String {
+fn hoist_helper_text(source: &str, sig: &HelperSig, body: &HelperBody, push_args: &[proc_macro2::Span]) -> String {
     let HelperSig {
         helper_name,
         param,
@@ -1492,40 +1498,36 @@ fn hoist_helper_text(sig: &HelperSig, body: &HelperBody) -> String {
         return format!("fn {helper_name}({param}: {item_ty}) -> {item_ty} {{\n{moved}    {helper_local}\n}}\n\n");
     }
     // Option shape: wrap each push arg in Some(..), append `None` as
-    // the fallthrough, return the Option
+    // the fallthrough, return the Option. The arg text comes from the
+    // push-call spans the plan recorded — syn spans, not a paren scan, so
+    // nested calls and string literals (`format!("({})", x)`) slice exactly.
     let needle = format!("{helper_local}.push(");
     let mut rebuilt = String::with_capacity(moved.len() + 16);
     let mut rest: &str = moved;
+    let mut spans = push_args.iter();
     while let Some(pos) = rest.find(&needle) {
         rebuilt.push_str(&rest[..pos]);
-        // find the matching close paren of this push call
-        let arg_start = pos + needle.len();
-        let mut depth = 1;
-        let mut end = arg_start;
-        for (i, c) in rest[arg_start..].char_indices() {
-            match c {
-                '(' => depth += 1,
-                ')' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end = arg_start + i;
-                        break;
-                    }
-                }
-                _ => {}
+        let arg = match spans.next() {
+            Some(span) => span_text(source, *span)
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| String::new()),
+
+            // span/statement drift (should not happen — the spans were
+            // recorded from this same body): fall back to no rewrite
+            None => {
+                rebuilt.push_str(&rest[pos..]);
+                rest = "";
+                break;
             }
-        }
-        let arg = rest[arg_start..end].trim().to_string();
+        };
         rebuilt.push_str(&format!("return Some({arg});"));
-        // skip past `)` and the trailing `;`
-        let mut tail = &rest[end..];
-        if let Some(stripped) = tail.strip_prefix(')') {
-            tail = stripped;
-        }
-        if let Some(stripped) = tail.strip_prefix(';') {
-            tail = stripped;
-        }
-        rest = tail;
+        // skip past this push statement: the next `;` ends it
+        let tail_start = pos + needle.len();
+        let semi = rest[tail_start..]
+            .find(';')
+            .map(|i| tail_start + i + 1)
+            .unwrap_or(rest.len());
+        rest = &rest[semi..];
     }
     rebuilt.push_str(rest);
     format!("fn {helper_name}({param}: {item_ty}) -> Option<{item_ty}> {{\n{rebuilt}    None\n}}\n\n")
@@ -1589,6 +1591,7 @@ pub fn fix_loop_hoist(source: &str, line: usize, name: &str) -> Result<String, S
                 if !matches!(f.body.stmts.as_slice(), [_])
         );
     let helper = hoist_helper_text(
+        source,
         &HelperSig {
             helper_name: helper_name.clone(),
             param: param.clone(),
@@ -1599,6 +1602,7 @@ pub fn fix_loop_hoist(source: &str, line: usize, name: &str) -> Result<String, S
             helper_local,
             conditional,
         },
+        &plan.push_args,
     );
     // the loop becomes the combinator over the helper: filter_map for the
     // Option shape, map for the direct shape
@@ -1651,6 +1655,17 @@ mod hoist_tests {
         assert!(fix_loop_hoist(src, 3, "").is_err());
         let read = "fn f(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for x in xs {\n        let n = out.len();\n        out.push(*x + n as u32);\n    }\n    out\n}\n";
         assert!(fix_loop_hoist(read, 3, "h").is_err());
+    }
+
+    #[test]
+    fn hoist_option_arg_with_nested_parens_and_string() {
+        // the paren scan this replaced would stop at the inner `)` of
+        // `format!("({})", x)` — the span slice keeps the whole argument
+        let src = "fn f(xs: &[u32]) -> Vec<String> {\n    let mut out: Vec<String> = Vec::new();\n    for x in xs {\n        let doubled = *x * 2;\n        if doubled > 1 {\n            out.push(format!(\"({})\", doubled));\n        }\n    }\n    out\n}\n";
+        let out = fix_loop_hoist(src, 3, "label").expect("fix applies");
+        assert!(out.contains("filter_map"), "{out}");
+        assert!(out.contains("return Some(format!(\"({})\", doubled));"), "{out}");
+        syn::parse_str::<syn::File>(&out).expect("fixed source parses");
     }
 }
 

@@ -137,7 +137,11 @@ class _DeployCheck:
         scan = run(self.cmd + ["--repo", str(self.project), "--json"], cwd=self.project)
         actions = parse_actions(scan.stdout)
         if actions is None:
-            return fail("the scan output was not the findings JSON contract")
+            # the command itself failed (bad path, missing interpreter,
+            # traceback) — its stderr IS the diagnosis, not the JSON
+            err = (scan.stderr or scan.stdout).strip().splitlines()
+            detail = err[0][:200] if err else f"exit {scan.returncode} with no output"
+            return fail(f"the scan output was not the findings JSON contract ({detail})")
         kinds = {a.kind for a in actions if a.severity == "fail"}
         missing = [k for k in EXPECTED_FAIL_KINDS if k not in kinds]
         if scan.returncode == 0 or missing:

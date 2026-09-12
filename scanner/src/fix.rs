@@ -1711,7 +1711,7 @@ mod loop_tests {
         // with "no for-loop at line N"). The finding line selects the
         // enclosing fn.
         let src = "fn first() -> u32 {\n    1\n}\n\nfn collect(xs: &[u32]) -> Vec<u32> {\n    let mut out = Vec::new();\n    for x in xs {\n        out.push(*x);\n    }\n    out\n}\n";
-        let out = fix_loop_pipeline(&src, 7).expect("fix applies in the later fn");
+        let out = fix_loop_pipeline(src, 7).expect("fix applies in the later fn");
         assert!(
             out.contains("let out: Vec<_> = xs.iter().map(|x| *x).collect();"),
             "{out}"
